@@ -69,12 +69,21 @@ def parse_float(text: str) -> float:
 def js_round(x):
     """JavaScript ``Math.round``: closest integral value, ties towards +Inf.
 
-    ``math.floor(x + 0.5)`` agrees only while that addition is exact.  Above
-    2**52 the ulp is 1 or more, the sum rounds first, and the floor is applied
-    to the wrong number: V8 returns 5129144868306001 for
-    ``Math.round(5129144868306001)`` while ``floor(... + 0.5)`` is ...002.
-    Doubles that large are already integral, so they are returned unchanged,
-    as ECMA-262 requires.  Accepts scalars and arrays.
+    Matches upstream's ``round(n)`` (ECMA-262).  ``math.floor(x + 0.5)``
+    agrees only while that addition is exact, and it is not:
+
+    * above 2**52 the ulp is 1 or more, the sum rounds first, and V8 returns
+      5129144868306001 for ``Math.round(5129144868306001)`` while
+      ``floor(... + 0.5)`` is ...002.  Doubles that large are already
+      integral, so they are returned unchanged, as ECMA-262 requires.
+    * at 0.49999999999999994 (the double just below 0.5) the sum rounds up to
+      1.0, so ``floor(x + 0.5)`` is 1 where V8 gives 0.
+    * negatives in (-1, 0) must give ``-0``, e.g. ``Math.round(-0.4)`` is -0.
+
+    So: integral x is returned unchanged, and otherwise ``floor(x)`` is
+    returned unless ``x - floor(x) >= 0.5``.  ``x - floor(x)`` is exact for
+    finite non-integral x, so the comparison is exact.  Accepts scalars and
+    arrays (arrays go through the kernel).
     """
     if isinstance(x, np.ndarray):
         a = as_f64(x)
@@ -82,9 +91,38 @@ def js_round(x):
         lib.n2f_js_round_array(a.size, _addr(a), _addr(out))
         return out
     x = float(x)
-    if math.floor(x) == x:
+    fl = _js_floor_py(x)
+    if fl == x:
         return x
-    return float(math.floor(x + 0.5))
+    if x - fl >= 0.5:
+        return _js_ceil_py(x)
+    return fl
+
+
+def _js_floor_py(x: float) -> float:
+    """ECMA-262 ``Math.floor`` as a float, keeping ``-0.0``.
+
+    ``math.floor`` returns an int, so ``float(math.floor(-0.4))`` is ``-1.0``
+    but ``float(math.floor(-0.0))`` is ``+0.0``, losing the sign ECMA-262
+    keeps.  Negatives are floored on their magnitude instead.
+    """
+    if x > 0.0:
+        return float(math.floor(x))
+    if x == 0.0:
+        return x  # +0 or -0 unchanged
+    if not math.isfinite(x):
+        return x
+    return -float(math.floor(-x))
+
+
+def _js_ceil_py(x: float) -> float:
+    """ECMA-262 ``Math.ceil`` as a float, keeping ``-0.0`` for negatives in
+    ``(-1, 0)`` (``Math.ceil(-0.4)`` is ``-0``)."""
+    if x < 0.0 and math.isfinite(x):
+        return -float(math.floor(-x))
+    if x == 0.0:
+        return x
+    return float(math.ceil(x))
 
 
 def _js_number_to_string(x: float) -> str:

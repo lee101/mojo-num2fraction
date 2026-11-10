@@ -31,6 +31,52 @@ toolchain bump rather than trusting this file.
 - `SIMD` has no `.min()` / `.max()` methods. The free `min(a, b)` / `max(a, b)`
   work on both scalars and `SIMD` values.
 
+### 1a. Signed zero and `std.math.floor`/`round` — verify, do not assume
+
+Found while porting `num2fraction` (JavaScript `Math.round`/`Math.floor`), all
+verified by printing `1.0 / result` and by differential tests against V8 and
+Python. Treat these as bugs to route around, not as behaviour to rely on.
+
+- **`Float64` comparisons order zeros by bit pattern.** `-0.0 < 0.0` is false
+  (correct) but `-0.4 < -0.0` is **true** and `0.0 < -0.0` is **false**,
+  whereas IEEE-754 makes all six ordering comparisons between signed zeros
+  false except `<=`/`>=`. Consequence: any test of the form `x < floor(x)` or
+  `result < 0.0` is unreliable the moment either operand is a zero. Compare
+  sums instead (`x + 1.0 < 1.0` for "x is negative"), or avoid the comparison.
+- **`std.math.floor` is not floor for negatives in (-1, 0):**
+  `floor(-0.4)` returns `-0.0` (checked with `1.0/floor(x) == -inf`). It is
+  correct for every other value tested. `std.math.trunc` and `std.math.ceil`
+  were correct with sign-preserving zeros. `std.math.round(-0.5)` looked
+  wrong too in one probe — do not use it for JavaScript parity work.
+- **Literal constants and folding.** `-0.0` written as a literal, and
+  `-0.0 if cond else 0.0`, both produced a true `-0.0` in the probes; the
+  traps above are in the library functions and the comparisons, not in the
+  literal. Still, confirm the sign with `1.0 / v`, never by printing `v`,
+  because `-0.0` prints as `-0.0` and `+0.0` prints as `0.0` but both compare
+  equal to `0.0`.
+- Working replacement used by this port (`src/kernels.mojo`):
+  ```mojo
+  @always_inline
+  def _js_floor(x: Float64) -> Float64:   # ECMA-262 Math.floor
+      var t = trunc(x)
+      if x != t:
+          if x + 1.0 < 1.0:               # x < 0, without comparing a zero
+              return t - 1.0
+      return t
+
+  @always_inline
+  def _js_ceil(x: Float64) -> Float64:    # ECMA-262 Math.ceil, keeps -0
+      var t = trunc(x)
+      if x != t:
+          if x + 1.0 > 1.0:               # x > 0
+              return t + 1.0
+      return t
+  ```
+  `Math.round` is then `ceil(x)` when `x - floor(x) >= 0.5`, else `floor(x)`,
+  with integral `x` returned unchanged. Note `floor(x + 0.5)` is **not**
+  `Math.round`: V8 gives `Math.round(0.49999999999999994) === 0` while that
+  sum rounds to 1.
+
 ## 2. Export / FFI
 
 - `@export("symbol_name")` sits on the line above the def. The ABI is an *effect*

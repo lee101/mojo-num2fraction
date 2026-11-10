@@ -89,6 +89,14 @@ patterns), zero disagreements.
   compares within the epsilon, so upstream's `findPrecision` multiplies by ten
   forever. Verified: `timeout 3 node -e "require('num2fraction')(Infinity)"`
   exits 124. `Num2FractionError` is raised instead of hanging.
+* **This is the one divergence from upstream 1.3.0.** Upstream 1.3.0
+  (2026-10-28) added `if (num === Infinity) return Infinity`, so
+  `num2fraction(Infinity)` is the number `Infinity` there; 1.3.0's own
+  `test/test.js` asserts it. The port targets 1.2.2 -- the published version
+  its fixture came from -- and raises for `Infinity` as it does for `NaN` and
+  `-Infinity`, which 1.3.0 also hangs on (verified: `timeout 5 node` exits 124
+  for both). `tests/test_parity_live.py::test_infinity_is_the_one_known_divergence_from_1_3_0`
+  records this so it stays a decision rather than a surprise.
 * **`findPrecision` is capped at 400 steps.** `e` overflows to infinity well
   before that, and a non-converging search is already caught by the
   finiteness check. A 300 000-value sweep of non-integral doubles between 1e4
@@ -116,8 +124,10 @@ PYTHONPATH=python /nvme0n1-disk/mojo-toolchain/testvenv/bin/python -m pytest tes
 
 ## Tests
 
-18 tests, all against real behaviour — nothing here only checks that the shim
-imports.
+35 tests, all against real behaviour — nothing here only checks that the shim
+imports. Two files: `tests/test_num2fraction.py` (the original suite, unchanged)
+and `tests/test_parity_live.py` (parity against upstream, added in the TEST
+phase; see below).
 
 * **1616 upstream values, exact.** `tests/upstream_vectors.json` was produced by
   `tests/upstream_vectors.js` running the real `index.js` under node, and the
@@ -139,11 +149,67 @@ imports.
 * The number `'0'` and the string `'-0'` take different paths upstream
   (`num === 0` is true for one and false for the other); both are asserted.
 
-Mutations that the suite catches, checked by rebuilding: changing the epsilon
-constant (4 failures), and dropping the 2^52 identity branch from `Math.round`
-(5 failures). Replacing the `fma` with `ax - trunc(q) * ay` is *not* caught —
-because Mojo contracts that expression back into the same FMA, so it was never
-a different program.
+### Parity against a live upstream (test_parity_live.py)
+
+Ground truth here is upstream's code run at test time, not hand-copied
+constants.
+
+* `tests/upstream_oracle.js` loads the real `index.js` and answers ~4 970
+  generated inputs: 2 400 random doubles (long and short decimal expansions),
+  the README's exact rationals, the doubles within an ulp of 0.5, ties and
+  negatives across 13 decades, degenerate strings (`''`, `'abc'`, `'0x10'`,
+  `'1/2'`, `.5`, `' 7 '`...) and JS containers. Set `NUM2FRACTION_UPSTREAM` to
+  an `index.js`; otherwise a cached npm 1.2.2 tarball is used, fetched once if
+  npm is present. Without node the live comparisons skip with a reason.
+* **`test/` from upstream's repo is the second fixture.** Its `test.js` (the
+  file `npm test` runs) is embedded verbatim, including the two `t.notEqual`
+  rows.
+* **Every public function is compared**: `num2fraction` (strings, exact),
+  `convert` (numerator, denominator, precision, against upstream's string
+  parsed back to numbers), `precision` (against upstream's `findPrecision`
+  re-run in the oracle, since it is not exported), `gcd` (against upstream's
+  `GCD` on the `(number, precision)` pairs upstream actually feeds it),
+  `fraction`, `num2fraction_batch`, `convert_array`, `precision_array`,
+  `js_round` and `js_remainder` (the last two against V8 directly).
+* **Tolerance is written down.** `TOLERANCE = 2 * math.ulp(0.0)` — i.e. zero —
+  applied with `math.isclose` to every numeric comparison. Measured, not
+  assumed: the port is bit-identical to upstream on all ~4 970 live values, so
+  any deviation at all is a parity failure rather than a rounding allowance.
+* **Degenerate inputs upstream defines**: empty input, one element, duplicates,
+  ±0, NaN/infinity, 2-D and broadcast shapes, non-broadcastable shapes (which
+  raise `ValueError`). Where upstream hangs (non-numeric strings, `NaN`,
+  `Infinity`, multi-element arrays, objects) the port raises
+  `Num2FractionError`; where upstream coerces a container through `Number(x)`,
+  the Python API raises `TypeError` instead of guessing.
+
+Mutations that the suite catches, re-measured after the TEST phase by
+rebuilding each: changing the epsilon constant to `1e-6` (11 failures); writing
+`_js_round` as `floor(x + 0.5)` (2 failures —
+`test_js_round_near_half_matches_v8` and the direct V8 comparison, because
+`findPrecision` lands on the same `e` for the doubles where the two disagree);
+always rounding up instead of comparing against the half (14 failures).
+Replacing the `fma` with `ax - trunc(q) * ay` is *not* caught — because Mojo
+contracts that expression back into the same FMA, so it was never a different
+program.
+
+One mutation that is *not* caught, stated so nobody reads more into the 35
+green tests than is there: dropping `_js_round`'s "integral x is returned
+unchanged" branch — keeping the half comparison for every input — still passes.
+That is not an oversight in the tests: the branch-free form returns `x` for
+every integral `x` as well (`x - floor(x)` is 0, so it does not round up), and
+doubles at or above 2**52 are all integral, so the two forms compute the same
+function on every finite input. The branch stays because it is the ECMA-262
+statement of the rule and easy to check by eye; it is redundant, which is
+exactly why no test can tell the difference.
+
+The TEST phase found and fixed one real bug: `_js_round` used
+`floor(x + 0.5)`, which is not `Math.round`. V8 gives
+`Math.round(0.49999999999999994) === 0` while that sum rounds to 1, and
+`Math.round(-0.4)` is `-0` while the shortcut gives `+0`. The kernel now
+implements ECMA-262 with an explicit floor/ceil, and `MOJO_NOTES.md` §1 records
+the toolchain trap that surfaced on the way: on this compiler `Float64`
+comparisons order zeros by bit pattern, so `-0.4 < -0.0` is true and
+`std.math.floor(-0.4)` is `-0.0`.
 
 ## Benchmarks
 

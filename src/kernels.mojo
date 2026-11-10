@@ -1,4 +1,4 @@
-from std.math import fma, floor, trunc
+from std.math import fma, trunc
 
 # num2fraction -- numeric core, ported to Mojo.
 #
@@ -20,9 +20,11 @@ from std.math import fma, floor, trunc
 #      sign of the dividend).  Mojo's `Float64 %` is a *floored* modulo, the
 #      result takes the sign of the divisor, so `_js_remainder` implements
 #      fmod by hand.  Using `%` here silently changes the GCD result.
-#   2. `Math.round` is `floor(x + 0.5)`, i.e. ties go towards +Infinity.
-#      Mojo's `round` is half-away-from-zero, so `_js_round` is used instead.
-#      They disagree on exactly the negative halves, e.g. -0.5.
+#   2. `round` in upstream is `Math.round`: nearest integral value, ties
+#      towards +Infinity, and -0 for negatives in [-0.5, 0).  Mojo's `round`
+#      is half-away-from-zero, so `_js_round` implements ECMA-262 instead.
+#      `floor(x + 0.5)` is NOT the same function: it returns 1 for
+#      0.49999999999999994, where V8 returns 0 (see `_js_round`).
 
 # Upstream literal.  Do not "simplify" this to 1e-6: the two differ in the
 # last digits and it changes which n the precision search stops at.
@@ -51,18 +53,62 @@ def _almost_eq(a: Float64, b: Float64) -> Bool:
 
 
 @always_inline
-def _js_round(x: Float64) -> Float64:
-    # JavaScript Math.round: the closest integral value, ties towards +Inf.
+def _js_floor(x: Float64) -> Float64:
+    # ECMA-262 Math.floor: trunc(x), minus one when x has a fraction and is
+    # negative.  Nothing here compares a signed zero: this toolchain orders
+    # zeros by bit pattern, so `-0.0 < x` is true for every positive x and
+    # `-0.4 < -0.0` is true, neither of which IEEE-754 allows.
     #
-    # `floor(x + 0.5)` is the usual one-liner and it is wrong above 2**52,
-    # where the ulp is 1 or more and the addition rounds before the floor:
-    # V8 gives Math.round(5129144868306001) === 5129144868306001 while
-    # floor(5129144868306001 + 0.5) is ...002.  Every double at or above
-    # 2**52 is already integral, and ECMA-262 returns x unchanged in that
-    # case, so the identity branch is the exact answer.
-    if floor(x) == x:
+    #   x + 1.0 < 1.0  <=>  x < 0  (for a fractional magnitude)
+    var t = trunc(x)
+    if x != t:
+        if x + 1.0 < 1.0:
+            return t - 1.0
+    return t
+
+
+@always_inline
+def _js_ceil(x: Float64) -> Float64:
+    # ECMA-262 Math.ceil: trunc(x), plus one when x has a fraction and is
+    # positive.  For a negative magnitude trunc is already the ceil, which is
+    # what gives Math.ceil(-0.4) === -0.
+    var t = trunc(x)
+    if x != t:
+        if x + 1.0 > 1.0:
+            return t + 1.0
+    return t
+
+
+@always_inline
+def _js_round(x: Float64) -> Float64:
+    # Matches upstream's `round(n)` -- JavaScript Math.round, ECMA-262.
+    #
+    # `floor(x + 0.5)` is the usual one-liner and it is wrong in two places:
+    #
+    #   1. 0.49999999999999994 (the double just below 0.5): x + 0.5 rounds
+    #      to exactly 1.0, so the floor is 1 while V8's Math.round is 0.
+    #      Verified: `node -e "Math.round(0.49999999999999994)"` is 0.
+    #      This is not cosmetic -- see _find_precision: it decides whether
+    #      _almost_eq(1/1, 0.49999999999999994) is true, i.e. whether the
+    #      search stops at e = 1 or goes on to e = 10.
+    #   2. negatives in [-0.5, 0) must give -0, e.g. Math.round(-0.4) is -0.
+    #
+    # ECMA-262: integral x is returned unchanged; otherwise the result is
+    # ceil(x) when x - floor(x) >= 0.5 and floor(x) otherwise.  Using ceil and
+    # floor directly keeps the sign of zero right (ceil(-0.4) is -0, floor(0.4)
+    # is +0), so no branch has to reason about a signed zero -- this
+    # toolchain's Float64 comparisons order zeros by bit pattern, which makes
+    # `-0.4 < -0.0` true and every such test unreliable.
+    #
+    # `x - floor(x)` is exact for finite non-integral x (Sterbenz), so the
+    # 0.5 test is exact.  Above 2**52 every double is integral, so the
+    # identity branch covers the values floor(x + 0.5) gets wrong when large.
+    var fl = _js_floor(x)
+    if fl == x:
         return x
-    return floor(x + 0.5)
+    if x - fl >= 0.5:
+        return _js_ceil(x)
+    return fl
 
 
 @always_inline
