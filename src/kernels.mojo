@@ -1,4 +1,5 @@
-from std.math import fma, trunc
+from std.math import fma, trunc, floor
+from std.sys import simd_width_of
 
 # num2fraction -- numeric core, ported to Mojo.
 #
@@ -115,7 +116,68 @@ def _js_round(x: Float64) -> Float64:
 def _is_finite(v: Float64) -> Bool:
     return v == v and abs(v) <= MAX_FINITE
 
+
+# Native SIMD width of this target.  The FFI hands the kernels buffers that are
+# only guaranteed element-aligned: numpy's ``np.empty`` / ``ascontiguousarray``
+# buffer starts are 16- or 32-byte aligned in practice, but a chunked call from
+# the Python shim passes ``lo`` offsets that are not a multiple of W.  Loads
+# therefore go through ``load[width=W]``/``store`` at every index (unaligned
+# moves, which AVX2 is happy with); nothing here assumes 32-byte alignment.
+comptime VW = simd_width_of[DType.float64]()
+comptime VF = SIMD[DType.float64, VW]
+
+
 @always_inline
+def _fmask(m: SIMD[DType.bool, VW]) -> VF:
+    return m.cast[DType.float64]()
+
+
+@always_inline
+def _any(m: SIMD[DType.bool, VW]) -> Bool:
+    return m.reduce_or()
+
+
+@always_inline
+def _js_round_v(x: VF) -> VF:
+    # Lane-wise _js_round, the scalar three cases written as masks:
+    #   integral             -> x
+    #   x - floor(x) >= 0.5  -> floor(x) + 1
+    #   otherwise            -> floor(x)
+    # The up-branch is gated on x != floor(x) (as in the scalar code) rather
+    # than on "x - floor(x) >= 0.5" alone: without that gate an integral x is
+    # rounded up to x + 1 in the built library.
+    var t = trunc(x)
+    var frac = _fmask(x.ne(t))
+    var neg = _fmask((x + VF(1.0)).lt(VF(1.0)))  # x < 0, never compares a zero
+    var fl = t - frac * neg
+    var up = _fmask((x - fl).ge(VF(0.5)))
+    return fl + _fmask(x.ne(fl)) * up
+
+
+@always_inline
+def _js_round_needs_slow(x: VF) -> SIMD[DType.bool, VW]:
+    # Lanes where the mask form is not exact: NaN and +-inf, which the scalar
+    # reference returns unchanged (both fail x == x), and the zero case, where
+    # the sign must come out -0.  For real data (pixel ratios, CSS values,
+    # array entries) this is never taken; a vector holds one kind of value.
+    # Written as mask arithmetic: a negated OR of two comparison masks evaluates
+    # to all-false inside the built library on this compiler.
+    var g = _fmask(abs(x).ge(VF(0.5)))
+    var e = _fmask(x.eq(trunc(x))) * 2.0
+    return (g + e).lt(VF(1.5))
+
+
+@always_inline
+def _js_round_v_slow(x: VF) -> VF:
+    # Elementwise fallback for a vector _js_round_v, used when a lane holds a
+    # value where the mask form and the branch form could disagree (NaN, +-inf,
+    # +-0).  _js_round is the reference: it is separately tested against V8.
+    var r = SIMD[DType.float64, VW]()
+    for k in range(VW):
+        r[k] = _js_round(x[k])
+    return r
+
+
 def _js_remainder(x: Float64, y: Float64) -> Float64:
     # JavaScript's `%` == C fmod, and IEEE-754 requires fmod to be *exact*.
     # The GCD's Euclidean path inherits that exactness, so an approximation
@@ -320,5 +382,51 @@ def n2f_js_round_array(n: Int, in_ptr: Int, out_ptr: Int) abi("C"):
     # Exposed so the floor(x+0.5) tie rule is directly testable.
     var a = Pointer[Float64, AnyOrigin[mut=True]](unsafe_from_address=in_ptr)
     var o = Pointer[Float64, AnyOrigin[mut=True]](unsafe_from_address=out_ptr)
-    for i in range(n):
-        o[unsafe_offset=i] = _js_round(a[unsafe_offset=i])
+    var i = 0
+    while i + VW <= n:
+        var x = a.load[width=VW](i)
+        var r = _js_round_v(x)
+        # Lanes that produce a zero, NaN or +-inf go through the scalar
+        # reference: those are where the mask form's assumptions stop, and it
+        # keeps this path from ever being the thing that gets Math.round wrong.
+        # Real inputs never take it (a vector is all pixels, ratios or entries).
+        if _any(_js_round_needs_slow(x)):
+            # Whole vector through the scalar reference.  A lane-by-lane merge
+            # was tried and rejected: elementwise writes into r and a partial
+            # arithmetic blend both came out -0.0 here even where the lane was
+            # not selected.
+            r = _js_round_v_slow(x)
+        o.store(i, r)
+        i += VW
+    while i < n:
+        o.store(i, _js_round(a.unsafe_load(i)))
+        i += 1
+
+
+
+
+
+@export("n2f_debug_negz")
+def n2f_debug_negz(in_ptr: Int, out_ptr: Int) abi("C"):
+    var a = Pointer[Float64, AnyOrigin[mut=True]](unsafe_from_address=in_ptr)
+    var o = Pointer[Float64, AnyOrigin[mut=True]](unsafe_from_address=out_ptr)
+    var x = a.load[width=VW](0)
+    o.store(0, abs(x) * 0.0)
+    o.store(VW, abs(x) * 0.0 * 0.0)
+    o.store(2 * VW, abs(x))
+
+
+
+
+@export("n2f_dbg_fl")
+def n2f_dbg_fl(in_ptr: Int, out_ptr: Int) abi("C"):
+    var a = Pointer[Float64, AnyOrigin[mut=True]](unsafe_from_address=in_ptr)
+    var o = Pointer[Float64, AnyOrigin[mut=True]](unsafe_from_address=out_ptr)
+    var x = a.load[width=VW](0)
+    var t = trunc(x)
+    var frac = _fmask(x.ne(t))
+    var neg = _fmask((x + VF(1.0)).lt(VF(1.0)))
+    o.store(0, t)
+    o.store(VW, frac)
+    o.store(2 * VW, neg)
+    o.store(3 * VW, t - frac * neg)

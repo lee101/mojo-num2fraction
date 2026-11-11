@@ -22,9 +22,6 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "python"))
 
 import mojo_num2fraction as m  # noqa: E402
 
-if __name__ == "__main__":
-    main()
-
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 EPSILON = 9.5367432e-7
 
