@@ -211,6 +211,37 @@ the toolchain trap that surfaced on the way: on this compiler `Float64`
 comparisons order zeros by bit pattern, so `-0.4 < -0.0` is true and
 `std.math.floor(-0.4)` is `-0.0`.
 
+## GPU
+
+**CPU only: memory-bound.** No GPU path exists, and none was written. The gate
+was checked on this checkout rather than assumed; the evidence is in
+`bench/gpu_gate.md`.
+
+* The shared GPU was present and had **5 470 MiB** free, so the memory gate
+  passed.
+* Per-byte arithmetic is below the cut for every kernel but one. On the
+  conservative count of `bench/analysis.md` (re-run this session), the best row
+  is manydigits `convert_array` at **4.48 flops/byte**; `typical` is 1.14–1.99
+  and `huge` is 0.75 (a 1 519-step dependent subtract chain, the worst possible
+  GPU shape). A generous re-count of every op in `src/kernels.mojo` puts
+  manydigits at 9.23, still under the break-even ratio for `Float64` on this
+  card.
+* Only manydigits clears 2 flops/byte, and its kernel is 21.5 sequential
+  `_js_remainder` calls per element (measured), so its cost is dependency depth,
+  not bandwidth. It also already runs at 55 ms for 1e6 elements.
+* Hard blocker on top of that: this environment cannot compile a GPU kernel.
+  `max.gpu.host` needs the `max` conda package (`MOJO_NOTES.md` §5b), and
+  `pixi.toml` pins `mojo` only, so `from max.gpu import block_idx, thread_idx`
+  fails with `unable to locate module 'max'`. Adding `max` would also move the
+  toolchain pin: the channel's newest `max` is `26.8.0.dev2026111005`, not the
+  lockstep `26.7.0.dev2026092905`.
+
+Because there is no GPU code, there are no GPU tests to skip: the suite is
+35 tests on the CPU path and needs no device. The CPU path is unchanged, so
+before and after numbers are identical and the timings in Benchmarks below
+stand. Sizes real callers pass are 1 to 1e6 elements and the GPU wins at none
+of them, so there is nothing to revert.
+
 ## Benchmarks
 
 Xeon E5-2697 v4, 36 cores, shared with other work, mojo 1.2.0.dev2026092605.
@@ -224,28 +255,35 @@ the fair baseline is upstream's own algorithm executed in Python.
 
 | input class | n | Mojo batch | Python loop | speedup | scalar ctypes per element |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| typical (0.001–64, 1–3 digits) | 1 000 | 0.15 ms | 12.3 ms | 80x | 16.0 us |
-| typical | 100 000 | 7.1 ms | 761 ms | 107x | 14.5 us |
-| typical | 1 000 000 | 30.2 ms | 4 826 ms | 160x | 11.3 us |
-| many digits | 1 000 000 | 127.7 ms | 17 083 ms | 134x | 12.7 us |
-| huge (\|x\| > 2^53) | 1 000 | 2.6 ms | 2.9 ms | **1.1x (parity)** | 17.8 us |
-| huge | 1 000 000 | 544.7 ms | 4 196 ms | 7.7x | 14.8 us |
+| typical (0.001–64, 1–3 digits) | 1 000 | 0.13 ms | 3.2 ms | 24.9x | 6.60 ms |
+| typical | 100 000 | 3.88 ms | 263.3 ms | 67.8x | 628.44 ms |
+| typical | 1 000 000 | 12.86 ms | 1 858.0 ms | 144.5x | 6 493.17 ms |
+| many digits | 1 000 | 0.33 ms | 6.0 ms | 18.3x | 6.59 ms |
+| many digits | 100 000 | 10.55 ms | 696.1 ms | 66.0x | 678.05 ms |
+| many digits | 1 000 000 | 53.43 ms | 6 425.1 ms | 120.3x | 7 079.69 ms |
+| huge (\|x\| > 2^53) | 1 000 | 2.44 ms | 1.4 ms | **0.6x** | 8.58 ms |
+| huge | 100 000 | 75.70 ms | 187.4 ms | 2.5x | 872.51 ms |
+| huge | 1 000 000 | 310.35 ms | 1 572.2 ms | 5.1x | 8 667.25 ms |
+
+Re-measured in the GPU phase after the unroll and SIMD phases had landed (same
+machine, same correctness gate, green: `flock /tmp/mojo-bench.lock` then
+`python bench/bench.py`, exit 0).
 
 The `huge` row is a real result and reported as one: when `|x|` passes 2^53
 the GCD's first division takes the binary-reduction path, which runs once per
-bit of the quotient, and at n = 1000 the kernel only matches the Python loop.
-It pulls ahead as the batch grows.
+bit of the quotient. At n = 1 000 the Python loop is **faster** than the batch
+call (1.4 ms against 2.44 ms); the batch only pulls ahead as it grows.
 
 Thread scaling, typical, 1e6 elements, chunked from the shim over a
 `ThreadPoolExecutor` (the kernel takes a range, so a chunk carries no state):
 
 | workers | 1 | 2 | 4 | 8 |
 | --- | ---: | ---: | ---: | ---: |
-| ms | 61.0 | 47.1 | 33.1 | 32.4 |
-| ns/element | 61.0 | 47.1 | 33.1 | 32.4 |
+| ms | 64.06 | 32.25 | 17.46 | 10.72 |
+| ns/element | 64.1 | 32.3 | 17.5 | 10.7 |
 
-1.9x on 8 workers rather than the 3.4x the toolchain reference records — this
-box is shared and was running other builds during the measurement.
+6.0x on 8 workers on this run. This box is shared, so the figure moves with the
+load on it.
 
 ## Layout
 
@@ -255,6 +293,8 @@ src/kernels.mojo           one compilation unit, 8 exports
 python/mojo_num2fraction/  _lib.py (ctypes), core.py (API), __init__.py
 tests/                      test_num2fraction.py, upstream_vectors.{js,json}
 bench/bench.py              correctness-gated timing
+bench/analysis.md           where the time goes (ANALYZE phase)
+bench/gpu_gate.md           GPU gate evidence (this phase): why CPU only
 ```
 
 Licence: MIT, as upstream.
