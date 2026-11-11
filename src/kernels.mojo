@@ -287,8 +287,15 @@ def n2f_gcd_array(n: Int, a_ptr: Int, b_ptr: Int, out_ptr: Int) abi("C"):
     var a = Pointer[Float64, AnyOrigin[mut=True]](unsafe_from_address=a_ptr)
     var b = Pointer[Float64, AnyOrigin[mut=True]](unsafe_from_address=b_ptr)
     var o = Pointer[Float64, AnyOrigin[mut=True]](unsafe_from_address=out_ptr)
-    for i in range(n):
+    comptime U = 4
+    var i = 0
+    while i + U <= n:
+        for u in range(U):
+            o[unsafe_offset=i + u] = _gcd(a[unsafe_offset=i + u], b[unsafe_offset=i + u])
+        i += U
+    while i < n:
         o[unsafe_offset=i] = _gcd(a[unsafe_offset=i], b[unsafe_offset=i])
+        i += 1
 
 
 @export("n2f_js_remainder_array")
@@ -297,8 +304,15 @@ def n2f_js_remainder_array(n: Int, a_ptr: Int, b_ptr: Int, out_ptr: Int) abi("C"
     var a = Pointer[Float64, AnyOrigin[mut=True]](unsafe_from_address=a_ptr)
     var b = Pointer[Float64, AnyOrigin[mut=True]](unsafe_from_address=b_ptr)
     var o = Pointer[Float64, AnyOrigin[mut=True]](unsafe_from_address=out_ptr)
-    for i in range(n):
+    comptime U = 4
+    var i = 0
+    while i + U <= n:
+        for u in range(U):
+            o[unsafe_offset=i + u] = _js_remainder(a[unsafe_offset=i + u], b[unsafe_offset=i + u])
+        i += U
+    while i < n:
         o[unsafe_offset=i] = _js_remainder(a[unsafe_offset=i], b[unsafe_offset=i])
+        i += 1
 
 
 @export("n2f_js_round_array")
