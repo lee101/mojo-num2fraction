@@ -255,9 +255,9 @@ the fair baseline is upstream's own algorithm executed in Python.
 
 | input class | n | Mojo batch | Python loop | speedup | scalar ctypes per element |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| typical (0.001–64, 1–3 digits) | 1 000 | 0.13 ms | 3.2 ms | 24.9x | 6.60 ms |
-| typical | 100 000 | 3.88 ms | 263.3 ms | 67.8x | 628.44 ms |
-| typical | 1 000 000 | 12.86 ms | 1 858.0 ms | 144.5x | 6 493.17 ms |
+| typical (0.001–64, 1–3 digits) | 1 000 | 0.17 ms | 4.9 ms | 29.5x | 6.50 ms |
+| typical | 100 000 | 3.85 ms | 249.8 ms | 64.9x | 650.62 ms |
+| typical | 1 000 000 | 11.88 ms | 2 087.8 ms | 175.7x | 7 353.40 ms |
 | many digits | 1 000 | 0.33 ms | 6.0 ms | 18.3x | 6.59 ms |
 | many digits | 100 000 | 10.55 ms | 696.1 ms | 66.0x | 678.05 ms |
 | many digits | 1 000 000 | 53.43 ms | 6 425.1 ms | 120.3x | 7 079.69 ms |
